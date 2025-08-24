@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { uploadVideoFile, MediaFile } from "@/lib/firebaseService";
-import { trimVideo, concatenateVideos, initFFmpeg } from "@/lib/videoProcessor";
+import { trimVideoSimple as trimVideo, concatenateVideos, initFFmpeg } from "@/lib/videoProcessorFixed";
 import { fileCache } from "@/lib/fileCache";
 import { firebaseML, VideoSegment } from "@/lib/firebaseML";
 import * as BeatDetection from "@/lib/beatDetection";
@@ -54,6 +54,98 @@ export default function VideoProcessor({
   const [isUploading, setIsUploading] = useState(false);
   const [useMLAnalysis, setUseMLAnalysis] = useState(false);
   const [mlAnalysisResults, setMlAnalysisResults] = useState<any>(null);
+
+  // Debug test function to understand trimming behavior
+  const testTrimming = async () => {
+    if (videoFiles.length === 0) {
+      toast({
+        title: "No Video",
+        description: "Please upload a video first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    try {
+      setIsProcessing(true);
+      setProgress(0);
+      setCurrentStep('🔍 Running trimming debug test...');
+
+      const primaryVideo = videoFiles[0];
+      let videoFile: File | null = fileCache.get(primaryVideo.id);
+      
+      if (!videoFile) {
+        console.log('Fetching video file for debug test...');
+        try {
+          const response = await fetch(primaryVideo.url);
+          const videoBlob = await response.blob();
+          videoFile = new File([videoBlob], primaryVideo.name, { 
+            type: primaryVideo.mimeType || 'video/mp4' 
+          });
+        } catch (error) {
+          throw new Error('Could not access video file');
+        }
+      }
+
+      console.log('\n🧪 DEBUG TEST: Testing 3 trimming methods on same 5-second segment');
+      console.log(`📹 Video: ${videoFile.name} (${videoFile.size} bytes)`);
+      
+      // Test a simple 5-second segment from seconds 5-10
+      const testStartTime = 5;
+      const testEndTime = 10;
+      const testDuration = testEndTime - testStartTime;
+      
+      console.log(`\n🎯 TEST PARAMETERS:`);
+      console.log(`  - Start time: ${testStartTime}s`);
+      console.log(`  - End time: ${testEndTime}s`);
+      console.log(`  - Duration: ${testDuration}s`);
+      console.log(`  - EXPECTED: Extract 5 seconds starting from the 5-second mark`);
+      
+      setCurrentStep('Testing trimming methods...');
+      setProgress(25);
+      
+      // Test the main trimVideo function (which tries all 4 methods)
+      const result = await trimVideo(videoFile, testStartTime, testEndTime);
+      
+      console.log(`\n✅ DEBUG TEST COMPLETE:`);
+      console.log(`  - Result size: ${result.size} bytes`);
+      console.log(`  - Expected: 5-second segment from the 5-second mark`);
+      console.log(`  - IF THIS SEGMENT IS WRONG: Check the FFmpeg console logs above`);
+      console.log(`  - The working method will be marked with ✅ in the logs`);
+      
+      setCurrentStep('Debug test complete - downloading sample');
+      setProgress(100);
+      
+      // Create a download link for the test result
+      const url = URL.createObjectURL(result);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `debug_test_${testStartTime}s_to_${testEndTime}s.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      toast({
+        title: "Debug Test Complete",
+        description: `Test segment (${testStartTime}s-${testEndTime}s) downloaded. Check console for details.`,
+      });
+
+    } catch (error) {
+      console.error('❌ Debug test failed:', error);
+      toast({
+        title: "Debug Test Failed", 
+        description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsProcessing(false);
+      setTimeout(() => {
+        setProgress(0);
+        setCurrentStep('');
+      }, 3000);
+    }
+  };
 
   const processVideoWithML = async () => {
     if (videoFiles.length === 0) {
@@ -163,11 +255,7 @@ export default function VideoProcessor({
         const segmentBlob = await trimVideo(
           videoFile,
           segment.startTime,
-          segment.endTime,
-          (progress) => {
-            const adjustedProgress = 45 + ((i + progress / 100) / smartSegments.length) * 35;
-            setProgress(adjustedProgress);
-          }
+          segment.endTime
         );
         
         if (segmentBlob) {
@@ -314,25 +402,27 @@ export default function VideoProcessor({
       
       // Debug: Add some test beat points if only one is provided
       if (effectiveBeatPoints.length === 1) {
-        console.log('⚠️ Only one beat point detected. Adding test beat points for better demo.');
-        const testBeatPoints = [
-          effectiveBeatPoints[0], // Keep the original
-          Math.min(effectiveBeatPoints[0] + 3, finalEndTime - 2), // Add one 3 seconds later
-          Math.min(effectiveBeatPoints[0] + 6, finalEndTime - 2), // Add one 6 seconds later
-        ].filter(beat => beat > 0 && beat < finalEndTime - 1);
+        console.log('⚠️ Only one beat point detected. Adding more beat points for better processing.');
+        const originalBeat = effectiveBeatPoints[0];
+        const additionalBeats = [];
         
-        effectiveBeatPoints.splice(0, effectiveBeatPoints.length, ...testBeatPoints);
-        console.log('  - Enhanced with test beat points:', effectiveBeatPoints);
+        // Add beats every 3 seconds from the original beat
+        for (let i = 1; i <= 2; i++) {
+          const newBeat = originalBeat + (i * 3);
+          if (newBeat < finalEndTime - 2) {
+            additionalBeats.push(newBeat);
+          }
+        }
+        
+        effectiveBeatPoints.push(...additionalBeats);
+        console.log('  - Enhanced beat points:', effectiveBeatPoints);
       }
 
       if (effectiveBeatPoints.length === 0) {
         console.log('⚠️ No effective beat points found, trimming entire video');
         // If no beat points within the end time, just trim the video
         setCurrentStep('Trimming video to end time...');
-        const trimmedVideo = await trimVideo(videoFile, 0, finalEndTime, (progress) => {
-          const adjustedProgress = 25 + (progress * 0.4);
-          setProgress(adjustedProgress);
-        });
+        const trimmedVideo = await trimVideo(videoFile, 0, finalEndTime);
         
         const processedBlob = trimmedVideo;
         setProcessedVideo(processedBlob);
@@ -353,26 +443,65 @@ export default function VideoProcessor({
       // Process each beat point into segments
       for (let i = 0; i < effectiveBeatPoints.length; i++) {
         const beatTime = effectiveBeatPoints[i];
-        const startTime = Math.max(0, beatTime - 1); // 1 second before beat
-        const endTime = Math.min(finalEndTime, beatTime + 1); // 1 second after beat
         
-        console.log(`  Segment ${i + 1}: ${startTime}s to ${endTime}s (duration: ${endTime - startTime}s)`);
+        // IMPROVED LOGIC: Create segments that make more sense for beat editing
+        // Option 1: Lead up to beat (better for music sync)
+        // Option 2: Center around beat (better for action moments)
         
-        setCurrentStep(`Processing segment ${i + 1}/${effectiveBeatPoints.length}...`);
+        const segmentDuration = 2.0; // 2 second segments
         
-        const segmentBlob = await trimVideo(
-          videoFile, 
-          startTime, 
-          endTime,
-          (progress) => {
-            const adjustedProgress = 40 + ((i + progress / 100) / effectiveBeatPoints.length) * 25;
-            setProgress(adjustedProgress);
-            console.log(`Segment ${i + 1} progress: ${progress}% (overall: ${adjustedProgress}%)`);
+        // Try "lead up to beat" approach first (this is usually what users want)
+        let startTime = Math.max(0, beatTime - segmentDuration);
+        let endTime = Math.min(finalEndTime, beatTime);
+        
+        // If we're at the beginning and can't go back, go forward instead
+        if (startTime === 0 && beatTime < segmentDuration) {
+          endTime = Math.min(finalEndTime, beatTime + segmentDuration);
+        }
+        
+        const actualDuration = endTime - startTime;
+        
+        if (actualDuration < 0.5) {
+          console.warn(`  ⚠️ Segment ${i + 1} too short (${actualDuration}s), skipping`);
+          continue;
+        }
+        
+        console.log(`  Segment ${i + 1} (Beat-synced):`);
+        console.log(`    - Beat time: ${beatTime}s`);
+        console.log(`    - Segment: ${startTime}s to ${endTime}s`);
+        console.log(`    - Duration: ${actualDuration.toFixed(2)}s`);
+        
+        if (endTime === beatTime) {
+          console.log(`    - Type: LEAD-UP segment (builds to beat)`);
+        } else {
+          console.log(`    - Type: FOLLOW-UP segment (starts from beat)`);
+        }
+        
+        setCurrentStep(`Processing segment ${i + 1}/${effectiveBeatPoints.length} (${actualDuration.toFixed(1)}s at beat ${beatTime}s)...`);
+        
+        try {
+          const segmentBlob = await trimVideo(
+            videoFile, 
+            startTime, 
+            endTime
+          );
+          
+          console.log(`  ✅ Segment ${i + 1} created: ${segmentBlob.size} bytes (${(segmentBlob.size / 1024).toFixed(1)} KB)`);
+          console.log(`  📹 This segment shows: ${actualDuration.toFixed(1)}s of action leading up to beat at ${beatTime}s`);
+          
+          // Verify segment is not empty or too small
+          if (segmentBlob.size < 1000) { // Less than 1KB is likely empty
+            console.warn(`  ⚠️ Segment ${i + 1} is very small (${segmentBlob.size} bytes) - skipping`);
+            continue;
+          } else {
+            segments.push(segmentBlob);
           }
-        );
-        
-        console.log(`  ✅ Segment ${i + 1} created:`, segmentBlob.size, 'bytes');
-        segments.push(segmentBlob);
+          
+        } catch (segmentError) {
+          console.error(`❌ Segment ${i + 1} failed:`, segmentError);
+          console.log(`⚠️ Skipping failed segment ${i + 1}`);
+          continue;
+        }
       }
 
       console.log(`🎬 All segments created. Total segments: ${segments.length}`);
@@ -387,7 +516,21 @@ export default function VideoProcessor({
         setProgress(adjustedProgress);
       });
 
-      console.log('🎬 Final video created:', finalVideo.size, 'bytes');
+      console.log('🎬 Final video analysis:');
+      console.log(`  - Size: ${finalVideo.size} bytes (${(finalVideo.size / 1024 / 1024).toFixed(2)} MB)`);
+      console.log(`  - Type: ${finalVideo.type}`);
+      console.log(`  - Original video size: ${videoFile.size} bytes (${(videoFile.size / 1024 / 1024).toFixed(2)} MB)`);
+      console.log(`  - Size ratio: ${((finalVideo.size / videoFile.size) * 100).toFixed(1)}%`);
+      
+      // Validate the final video
+      if (finalVideo.size === 0) {
+        throw new Error('Final video is empty - processing failed');
+      }
+      
+      if (finalVideo.size < 10000) { // Less than 10KB is suspicious
+        console.warn('⚠️ Final video is very small - might not contain actual content');
+      }
+      
       setProcessedVideo(finalVideo);
       
       // Upload to Firebase
@@ -587,6 +730,28 @@ export default function VideoProcessor({
                 )}
               </Button>
             )}
+          </div>
+
+          {/* Debug Test Button */}
+          <div className="flex justify-center">
+            <Button 
+              onClick={testTrimming}
+              disabled={isProcessing || videoFiles.length === 0}
+              variant="outline"
+              size="sm"
+              className="border-dashed border-yellow-300 text-yellow-700 hover:bg-yellow-50"
+            >
+              {isProcessing ? (
+                <>
+                  <Loader2 className="h-3 w-3 mr-2 animate-spin" />
+                  Testing...
+                </>
+              ) : (
+                <>
+                  🔍 Debug Trim Test (5s-10s)
+                </>
+              )}
+            </Button>
           </div>
 
           {/* Requirements Info */}

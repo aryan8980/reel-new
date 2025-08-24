@@ -11,9 +11,49 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
+    chunkSizeWarningLimit: 1000, // Increase limit to 1MB
     rollupOptions: {
       output: {
-        manualChunks: undefined
+        manualChunks: (id) => {
+          // Vendor chunks
+          if (id.includes('react') && !id.includes('router')) {
+            return 'vendor-react';
+          }
+          if (id.includes('react-router')) {
+            return 'vendor-router';  
+          }
+          if (id.includes('@radix-ui') || id.includes('lucide-react')) {
+            return 'vendor-ui';
+          }
+          if (id.includes('@ffmpeg')) {
+            return 'vendor-ffmpeg';
+          }
+          if (id.includes('firebase')) {
+            return 'vendor-firebase';
+          }
+          if (id.includes('openai')) {
+            return 'vendor-ai';
+          }
+          if (id.includes('@tanstack/react-query')) {
+            return 'vendor-query';
+          }
+          
+          // Group components by functionality
+          if (id.includes('VideoProcessor') || id.includes('videoProcessor')) {
+            return 'video-processing';
+          }
+          if (id.includes('WaveformVisualizer') || id.includes('BeatTimeline') || id.includes('beatDetection')) {
+            return 'audio-visualization';
+          }
+          if (id.includes('HashtagGenerator') || id.includes('openai')) {
+            return 'ai-features';
+          }
+          
+          // Utils and common
+          if (id.includes('src/lib') || id.includes('src/hooks')) {
+            return 'utils';
+          }
+        }
       }
     }
   },
@@ -24,7 +64,12 @@ export default defineConfig({
     }
   },
   optimizeDeps: {
-    exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util']
+    exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'],
+    include: [
+      'react', 
+      'react-dom',
+      'lucide-react'
+    ]
   },
   worker: {
     format: 'es'

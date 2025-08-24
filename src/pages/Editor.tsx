@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -13,17 +13,34 @@ import {
   Video,
   Hash,
   Settings,
-  User
+  User,
+  Loader2
 } from "lucide-react";
 import AudioUpload from "@/components/AudioUpload";
 import VideoUpload from "@/components/VideoUpload";
-import BeatTimeline from "@/components/BeatTimeline";
-import HashtagGenerator from "@/components/HashtagGenerator";
 import SettingsModal from "@/components/SettingsModal";
-import VideoProcessor from "@/components/VideoProcessor";
 import { useNavigate } from "react-router-dom";
 import { MediaFile } from "@/lib/firebaseService";
 import { useAuth } from "@/contexts/AuthContext";
+
+// Lazy load heavy components
+import { 
+  BeatTimeline, 
+  HashtagGenerator, 
+  VideoProcessor 
+} from "@/components/LazyComponents";
+
+// Loading fallback for heavy components
+const ComponentLoader = ({ message }: { message: string }) => (
+  <Card className="w-full">
+    <CardContent className="flex items-center justify-center p-8">
+      <div className="flex items-center gap-3">
+        <Loader2 className="h-5 w-5 animate-spin" />
+        <span>{message}</span>
+      </div>
+    </CardContent>
+  </Card>
+);
 
 const Editor = () => {
   const [audioFile, setAudioFile] = useState<MediaFile | null>(null);
@@ -177,15 +194,17 @@ const Editor = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <BeatTimeline 
-                audioFile={audioFile}
-                beatPoints={beatPoints}
-                onBeatPointsChange={setBeatPoints}
-                isPlaying={isPlaying}
-                onPlayToggle={setIsPlaying}
-                endTime={endTime}
-                onEndTimeChange={setEndTime}
-              />
+              <Suspense fallback={<ComponentLoader message="Loading beat timeline..." />}>
+                <BeatTimeline 
+                  audioFile={audioFile}
+                  beatPoints={beatPoints}
+                  onBeatPointsChange={setBeatPoints}
+                  isPlaying={isPlaying}
+                  onPlayToggle={setIsPlaying}
+                  endTime={endTime}
+                  onEndTimeChange={setEndTime}
+                />
+              </Suspense>
             </CardContent>
           </Card>
         )}
@@ -193,16 +212,20 @@ const Editor = () => {
         {/* Controls & Export */}
         <div className="grid grid-cols-1 gap-6">
           {/* Hashtag Generator */}
-          <HashtagGenerator />
+          <Suspense fallback={<ComponentLoader message="Loading hashtag generator..." />}>
+            <HashtagGenerator />
+          </Suspense>
           
           {/* Video Processing */}
-          <VideoProcessor 
-            videoFiles={videoFiles}
-            beatPoints={beatPoints}
-            endTime={endTime}
-            onProcessingComplete={setProcessedVideo}
-            audioFiles={audioFile ? [audioFile] : []}
-          />
+          <Suspense fallback={<ComponentLoader message="Loading video processor..." />}>
+            <VideoProcessor 
+              videoFiles={videoFiles}
+              beatPoints={beatPoints}
+              endTime={endTime}
+              onProcessingComplete={setProcessedVideo}
+              audioFiles={audioFile ? [audioFile] : []}
+            />
+          </Suspense>
         </div>
 
         {/* Quick Stats */}
