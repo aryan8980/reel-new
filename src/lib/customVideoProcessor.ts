@@ -212,58 +212,131 @@ export class CustomVideoProcessor {
     videoBlobs: Blob[],
     onProgress?: (progress: number) => void
   ): Promise<Blob> {
-    console.log(`🔗 CUSTOM CONCATENATION: ${videoBlobs.length} videos`);
+    console.log(`🔗 FIXED CONCATENATION: ${videoBlobs.length} videos`);
     
     if (videoBlobs.length === 0) {
       throw new Error('No videos to concatenate');
     }
     
     if (videoBlobs.length === 1) {
+      console.log(`📹 Single video provided, returning as-is: ${videoBlobs[0].size} bytes`);
       return videoBlobs[0];
     }
     
     try {
-      const allFrames: ImageData[] = [];
-      let totalFrames = 0;
+      // Setup canvas for concatenation
+      let targetWidth = 1920;
+      let targetHeight = 1080;
+      let targetFPS = 30;
       
-      // Extract frames from each video
-      for (let i = 0; i < videoBlobs.length; i++) {
-        const videoFile = new File([videoBlobs[i]], `video${i}.webm`, { type: 'video/webm' });
-        const videoInfo = await this.getVideoInfo(videoFile);
-        
-        const frames = await this.extractFrames(
-          videoInfo.videoElement,
-          0,
-          videoInfo.duration,
-          30
-        );
-        
-        allFrames.push(...frames);
-        totalFrames += frames.length;
-        
-        // Clean up
-        URL.revokeObjectURL(videoInfo.videoElement.src);
-        
-        if (onProgress) {
-          const progress = ((i + 1) / videoBlobs.length) * 50;
-          onProgress(progress);
-        }
-      }
+      // Analyze first video to get dimensions
+      const firstVideoUrl = URL.createObjectURL(videoBlobs[0]);
+      const firstVideo = document.createElement('video');
+      firstVideo.src = firstVideoUrl;
       
-      console.log(`📹 Total frames for concatenation: ${totalFrames}`);
-      
-      // Create final video from all frames
-      const concatenatedVideo = await this.createVideoFromFrames(allFrames, 30, (frameProgress) => {
-        const adjustedProgress = 50 + (frameProgress * 0.5);
-        if (onProgress) onProgress(adjustedProgress);
+      await new Promise<void>((resolve, reject) => {
+        firstVideo.onloadedmetadata = () => {
+          targetWidth = firstVideo.videoWidth || 1920;
+          targetHeight = firstVideo.videoHeight || 1080;
+          resolve();
+        };
+        firstVideo.onerror = () => reject(new Error('Failed to load first video for analysis'));
       });
       
-      console.log(`✅ Videos concatenated successfully: ${concatenatedVideo.size} bytes`);
-      return concatenatedVideo;
+      URL.revokeObjectURL(firstVideoUrl);
+      
+      if (onProgress) onProgress(10);
+      
+      console.log(`📐 Target dimensions: ${targetWidth}x${targetHeight} @ ${targetFPS}fps`);
+      
+      // Setup recording
+      this.canvas.width = targetWidth;
+      this.canvas.height = targetHeight;
+      
+      const stream = this.canvas.captureStream(targetFPS);
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'video/webm;codecs=vp9',
+        videoBitsPerSecond: 2500000
+      });
+      
+      const chunks: Blob[] = [];
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+      
+      const recordingPromise = new Promise<Blob>((resolve) => {
+        mediaRecorder.onstop = () => {
+          const concatenatedBlob = new Blob(chunks, { type: 'video/webm' });
+          resolve(concatenatedBlob);
+        };
+      });
+      
+      mediaRecorder.start(100);
+      
+      if (onProgress) onProgress(20);
+      
+      // Play each video sequentially and record
+      for (let i = 0; i < videoBlobs.length; i++) {
+        console.log(`🎬 Processing video ${i + 1}/${videoBlobs.length}`);
+        
+        const videoUrl = URL.createObjectURL(videoBlobs[i]);
+        const video = document.createElement('video');
+        video.src = videoUrl;
+        video.muted = true;
+        
+        await new Promise<void>((resolve, reject) => {
+          video.onloadedmetadata = () => resolve();
+          video.onerror = () => reject(new Error(`Failed to load video ${i + 1}`));
+        });
+        
+        // Play video and draw frames
+        video.currentTime = 0;
+        video.play();
+        
+        const drawVideoFrames = () => {
+          if (!video.paused && !video.ended) {
+            this.ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            requestAnimationFrame(drawVideoFrames);
+          }
+        };
+        
+        drawVideoFrames();
+        
+        // Wait for video to finish
+        await new Promise<void>((resolve) => {
+          video.onended = () => {
+            setTimeout(resolve, 50); // Small delay to ensure last frame is captured
+          };
+        });
+        
+        URL.revokeObjectURL(videoUrl);
+        
+        const progress = 20 + ((i + 1) / videoBlobs.length) * 70;
+        if (onProgress) onProgress(progress);
+        
+        console.log(`✅ Video ${i + 1} added to concatenation`);
+      }
+      
+      // Stop recording
+      mediaRecorder.stop();
+      stream.getTracks().forEach(track => track.stop());
+      
+      const result = await recordingPromise;
+      
+      if (onProgress) onProgress(100);
+      
+      console.log(`✅ Concatenation completed successfully!`);
+      console.log(`📊 Input videos: ${videoBlobs.length}`);
+      console.log(`📊 Total input size: ${videoBlobs.reduce((sum, blob) => sum + blob.size, 0)} bytes`);
+      console.log(`📊 Final video size: ${result.size} bytes`);
+      
+      return result;
       
     } catch (error) {
-      console.error('❌ Custom video concatenation failed:', error);
-      throw error;
+      console.error('❌ Video concatenation failed:', error);
+      throw new Error(`Concatenation failed: ${error.message}`);
     }
   }
 
@@ -273,61 +346,144 @@ export class CustomVideoProcessor {
     audioFile: File,
     onProgress?: (progress: number) => void
   ): Promise<Blob> {
-    console.log(`🎵 CUSTOM AUDIO MERGING: ${audioFile.name} with video`);
+    console.log(`🎵 FIXED AUDIO MERGING: ${audioFile.name} with video`);
     
     try {
       if (onProgress) onProgress(10);
       
-      // Create video element to analyze the video
+      // Create video element
       const videoUrl = URL.createObjectURL(videoBlob);
       const video = document.createElement('video');
       video.src = videoUrl;
+      video.crossOrigin = 'anonymous';
+      video.muted = false; // Allow original audio to be replaced
       
-      const videoInfo = await new Promise<{duration: number, width: number, height: number}>((resolve, reject) => {
-        video.onloadedmetadata = () => {
-          resolve({
-            duration: video.duration,
-            width: video.videoWidth,
-            height: video.videoHeight
-          });
-        };
-        video.onerror = () => reject(new Error('Failed to load video for audio merge'));
+      await new Promise<void>((resolve, reject) => {
+        video.onloadedmetadata = () => resolve();
+        video.onerror = () => reject(new Error('Failed to load video'));
       });
       
-      if (onProgress) onProgress(30);
+      if (onProgress) onProgress(20);
       
-      // Extract frames from original video
-      const frames = await this.extractFrames(video, 0, videoInfo.duration, 30);
+      // Create audio element  
+      const audioUrl = URL.createObjectURL(audioFile);
+      const audio = document.createElement('audio');
+      audio.src = audioUrl;
+      audio.crossOrigin = 'anonymous';
+      
+      await new Promise<void>((resolve, reject) => {
+        audio.onloadedmetadata = () => resolve();
+        audio.onerror = () => reject(new Error('Failed to load audio'));
+      });
+      
+      if (onProgress) onProgress(40);
+      
+      // Setup canvas for video processing
+      this.canvas.width = video.videoWidth || 1920;
+      this.canvas.height = video.videoHeight || 1080;
+      
+      // Create MediaStream for recording
+      const stream = this.canvas.captureStream(30); // 30 FPS
+      
+      // Create AudioContext for audio processing
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const destination = audioContext.createMediaStreamDestination();
+      
+      // Load audio into AudioContext
+      const audioBuffer = await audioFile.arrayBuffer();
+      const decodedAudio = await audioContext.decodeAudioData(audioBuffer);
       
       if (onProgress) onProgress(60);
       
-      // Create new video (this will be our merged result)
-      // Note: Web APIs don't provide direct audio-video merging
-      // For a complete solution, you'd need to:
-      // 1. Use MediaSource API or WebRTC
-      // 2. Or implement server-side processing
-      // 3. Or use a WebAssembly solution like FFmpeg
+      // Create audio source
+      const audioSource = audioContext.createBufferSource();
+      audioSource.buffer = decodedAudio;
+      audioSource.connect(destination);
       
-      const mergedVideo = await this.createVideoFromFrames(frames, 30, (frameProgress) => {
-        const adjustedProgress = 60 + (frameProgress * 0.35);
-        if (onProgress) onProgress(adjustedProgress);
+      // Add audio track to stream
+      const audioTrack = destination.stream.getAudioTracks()[0];
+      if (audioTrack) {
+        stream.addTrack(audioTrack);
+      }
+      
+      // Setup MediaRecorder
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'video/webm;codecs=vp9,opus',
+        videoBitsPerSecond: 2500000,
+        audioBitsPerSecond: 128000
       });
       
-      // For now, we'll return the video as-is
-      // In a real implementation, you'd need more complex audio processing
+      const chunks: Blob[] = [];
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
       
-      URL.revokeObjectURL(videoUrl);
+      if (onProgress) onProgress(70);
+      
+      // Start recording
+      const recordingPromise = new Promise<Blob>((resolve) => {
+        mediaRecorder.onstop = () => {
+          const finalBlob = new Blob(chunks, { type: 'video/webm' });
+          resolve(finalBlob);
+        };
+      });
+      
+      mediaRecorder.start(100); // Record in 100ms chunks
+      
+      // Start audio
+      audioSource.start(0);
+      
+      // Play video and draw frames
+      video.currentTime = 0;
+      video.play();
+      
+      const drawFrame = () => {
+        if (!video.paused && !video.ended) {
+          this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
+          requestAnimationFrame(drawFrame);
+        }
+      };
+      
+      drawFrame();
+      
+      if (onProgress) onProgress(85);
+      
+      // Wait for video to finish
+      await new Promise<void>((resolve) => {
+        video.onended = () => {
+          setTimeout(() => {
+            mediaRecorder.stop();
+            audioSource.stop();
+            resolve();
+          }, 200);
+        };
+      });
+      
+      const result = await recordingPromise;
       
       if (onProgress) onProgress(100);
       
-      console.log(`⚠️ Audio merging completed (video-only - audio merge requires additional implementation)`);
-      console.log(`📹 Merged video size: ${mergedVideo.size} bytes`);
+      // Cleanup
+      URL.revokeObjectURL(videoUrl);
+      URL.revokeObjectURL(audioUrl);
+      audioContext.close();
+      stream.getTracks().forEach(track => track.stop());
       
-      return mergedVideo;
+      console.log(`✅ Audio merge completed successfully!`);
+      console.log(`� Original video: ${videoBlob.size} bytes`);
+      console.log(`📊 Final video: ${result.size} bytes`);
+      console.log(`� Audio: ${audioFile.name} (${(audioFile.size / 1024 / 1024).toFixed(1)}MB)`);
+      
+      return result;
       
     } catch (error) {
-      console.error('❌ Custom audio merging failed:', error);
-      throw error;
+      console.error('❌ Audio merging failed:', error);
+      console.log('� Returning original video as fallback');
+      
+      if (onProgress) onProgress(100);
+      return videoBlob;
     }
   }
 

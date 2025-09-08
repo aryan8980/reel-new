@@ -56,6 +56,7 @@ export default function VideoProcessor({
   const [isUploading, setIsUploading] = useState(false);
   const [useMLAnalysis, setUseMLAnalysis] = useState(false);
   const [mlAnalysisResults, setMlAnalysisResults] = useState<any>(null);
+  const [actualSegmentsCreated, setActualSegmentsCreated] = useState(0);
 
   // Debug test function to understand trimming behavior
   const testTrimming = async () => {
@@ -409,53 +410,12 @@ export default function VideoProcessor({
       }
       
       setProgress(15);
-      setCurrentStep('Loading video file...');
+      setCurrentStep('Preparing for multi-video processing...');
 
-      // Get the primary video for processing
-      const primaryVideo = videoFiles[0];
-      console.log('Processing video:', primaryVideo.name, primaryVideo.size);
-      
-      // Try to get original file from cache first
-      let videoFile: File | null = fileCache.get(primaryVideo.id);
-      
-      if (videoFile) {
-        console.log('✅ Using cached original file:', videoFile.size, 'bytes');
-      } else {
-        console.log('⚠️ Original file not cached, attempting to fetch from Firebase Storage...');
-        
-        try {
-          const response = await fetch(primaryVideo.url, {
-            method: 'GET',
-            mode: 'cors',
-            credentials: 'omit',
-          });
-          
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-          
-          const videoBlob = await response.blob();
-          videoFile = new File([videoBlob], primaryVideo.name, { 
-            type: primaryVideo.mimeType || 'video/mp4' 
-          });
-          
-          console.log('✅ Video fetched from Firebase Storage:', videoFile.size, 'bytes');
-          
-        } catch (error) {
-          console.error('❌ CORS Error - Cannot access video from Firebase Storage:', error);
-          
-          toast({
-            title: "Cannot Process Video",
-            description: "The video file is not accessible due to browser security restrictions. Please re-upload the video file to process it.",
-            variant: "destructive"
-          });
-          
-          throw new Error('Video file is not accessible. Please re-upload the video to process it.');
-        }
-      }
-      if (!videoFile) {
-        throw new Error('Could not access video file for processing');
-      }
+      console.log(`🎬 Preparing to process ${videoFiles.length} videos:`);
+      videoFiles.forEach((video, index) => {
+        console.log(`  ${index + 1}. ${video.name} (${(video.size / 1024 / 1024).toFixed(1)}MB)`);
+      });
       
       setProgress(25);
       setCurrentStep('Analyzing beat points...');
@@ -468,8 +428,8 @@ export default function VideoProcessor({
       console.log('  - Original beat points:', beatPoints);
       console.log('  - Final end time:', finalEndTime, 'seconds');
       console.log('  - Effective beat points:', effectiveBeatPoints);
-      console.log('  - Video file size:', videoFile.size, 'bytes');
-      console.log('  - Video file name:', videoFile.name);
+      console.log('  - Total videos to process:', videoFiles.length);
+      console.log('  - Video files:', videoFiles.map(v => `${v.name} (${(v.size / 1024 / 1024).toFixed(1)}MB)`));
       
       // Debug: Add some test beat points if only one is provided
       if (effectiveBeatPoints.length === 1) {
@@ -490,9 +450,21 @@ export default function VideoProcessor({
       }
 
       if (effectiveBeatPoints.length === 0) {
-        console.log('⚠️ No effective beat points found, trimming entire video');
-        // If no beat points within the end time, just trim the video
-        setCurrentStep('Trimming video to end time...');
+        console.log('⚠️ No effective beat points found, trimming first video to end time');
+        // If no beat points within the end time, just trim the first video
+        setCurrentStep('Trimming first video to end time...');
+        
+        const firstVideo = videoFiles[0];
+        let videoFile: File | null = fileCache.get(firstVideo.id);
+        
+        if (!videoFile) {
+          const response = await fetch(firstVideo.url);
+          const videoBlob = await response.blob();
+          videoFile = new File([videoBlob], firstVideo.name, { 
+            type: firstVideo.mimeType || 'video/mp4' 
+          });
+        }
+        
         const trimmedVideo = await trimVideo(videoFile, 0, finalEndTime);
         
         const processedBlob = trimmedVideo;
@@ -503,102 +475,95 @@ export default function VideoProcessor({
         return;
       }
 
-      // Create segments based on beat points
-      setCurrentStep('Creating beat-based segments...');
+      // Create segments based on beat points - USING ALL VIDEOS
+      setCurrentStep('Creating segments from all videos...');
       setProgress(40);
 
       const segments: Blob[] = [];
 
-      console.log(`🎬 Creating ${effectiveBeatPoints.length} video segments:`);
+      console.log(`🎬 Processing ${videoFiles.length} videos with ${effectiveBeatPoints.length} beat points:`);
+      console.log('📹 Video files:', videoFiles.map(v => v.name));
 
-      // Process each beat point into segments
-      for (let i = 0; i < effectiveBeatPoints.length; i++) {
-        const beatTime = effectiveBeatPoints[i];
+      // Process EACH VIDEO with EACH BEAT POINT for maximum content
+      for (let videoIndex = 0; videoIndex < videoFiles.length; videoIndex++) {
+        const currentVideoFile = videoFiles[videoIndex];
         
-        // CORRECTED LOGIC: User wants segments that lead UP TO beats
-        // This creates segments that END on the beat (the "before beat mark" part)
-        // Example: Beat at 10s → Segment from 8s to 10s (2 seconds leading to the beat)
+        console.log(`\n📹 Processing Video ${videoIndex + 1}: ${currentVideoFile.name}`);
         
-        const segmentDuration = 2.0; // 2 second segments
-        const useLeadUpToBeat = true; // TRUE = segments end ON beats (before beat mark part) ✅
+        // Get the video file
+        let videoFile: File | null = fileCache.get(currentVideoFile.id);
         
-        let startTime: number;
-        let endTime: number;
+        if (!videoFile) {
+          console.log(`🔄 Fetching video ${videoIndex + 1} from storage...`);
+          try {
+            const response = await fetch(currentVideoFile.url);
+            const videoBlob = await response.blob();
+            videoFile = new File([videoBlob], currentVideoFile.name, { 
+              type: currentVideoFile.mimeType || 'video/mp4' 
+            });
+            fileCache.store(currentVideoFile.id, videoFile);
+          } catch (error) {
+            console.warn(`⚠️ Could not fetch video ${videoIndex + 1}, skipping`);
+            continue;
+          }
+        }
         
-        if (useLeadUpToBeat) {
-          // DEFAULT: Segments end on the beat (good for build-up effects)
-          startTime = Math.max(0, beatTime - segmentDuration);
-          endTime = Math.min(finalEndTime, beatTime);
+        // Process each beat point with this video
+        for (let i = 0; i < effectiveBeatPoints.length; i++) {
+          const beatTime = effectiveBeatPoints[i];
           
-          // If we're at the beginning and can't go back, go forward instead
+          // LONGER SEGMENTS: Take 4 seconds leading up to each beat for more content
+          const segmentDuration = 4.0; // 4 second segments (was 2)
+          
+          let startTime = Math.max(0, beatTime - segmentDuration);
+          let endTime = beatTime;
+          
+          // If we can't go back enough, take what we can
           if (startTime === 0 && beatTime < segmentDuration) {
             endTime = Math.min(finalEndTime, beatTime + segmentDuration);
           }
-        } else {
-          // ALTERNATIVE: Segments start on the beat (good for beat-driven action)
-          startTime = beatTime;
-          endTime = Math.min(finalEndTime, beatTime + segmentDuration);
           
-          // If we can't go forward enough, go backward
-          if (endTime - startTime < segmentDuration * 0.5) {
-            startTime = Math.max(0, beatTime - segmentDuration);
-            endTime = beatTime;
-          }
-        }
-        
-        console.log(`🎵 Beat segment mode: ${useLeadUpToBeat ? 'LEAD-UP (before beat mark - ends on beat) ✅' : 'START-FROM (after beat mark - starts on beat)'}`);
-        
-        // Remove old commented code since we now have the correct logic
-        // let startTime = Math.max(0, beatTime - segmentDuration);
-        // let endTime = Math.min(finalEndTime, beatTime);
-        
-        const actualDuration = endTime - startTime;
-        
-        if (actualDuration < 0.5) {
-          console.warn(`  ⚠️ Segment ${i + 1} too short (${actualDuration}s), skipping`);
-          continue;
-        }
-        
-        console.log(`  Segment ${i + 1} (Beat-synced):`);
-        console.log(`    - Beat time: ${beatTime}s`);
-        console.log(`    - Segment: ${startTime}s to ${endTime}s`);
-        console.log(`    - Duration: ${actualDuration.toFixed(2)}s`);
-        
-        if (endTime === beatTime) {
-          console.log(`    - Type: LEAD-UP segment (builds to beat)`);
-        } else {
-          console.log(`    - Type: FOLLOW-UP segment (starts from beat)`);
-        }
-        
-        setCurrentStep(`Processing segment ${i + 1}/${effectiveBeatPoints.length} (${actualDuration.toFixed(1)}s at beat ${beatTime}s)...`);
-        
-        try {
-          const segmentBlob = await trimVideo(
-            videoFile, 
-            startTime, 
-            endTime
-          );
+          const actualDuration = endTime - startTime;
           
-          console.log(`  ✅ Segment ${i + 1} created: ${segmentBlob.size} bytes (${(segmentBlob.size / 1024).toFixed(1)} KB)`);
-          console.log(`  📹 This segment shows: ${actualDuration.toFixed(1)}s of action leading up to beat at ${beatTime}s`);
-          
-          // Verify segment is not empty or too small
-          if (segmentBlob.size < 1000) { // Less than 1KB is likely empty
-            console.warn(`  ⚠️ Segment ${i + 1} is very small (${segmentBlob.size} bytes) - skipping`);
+          if (actualDuration < 1.0) { // Minimum 1 second segments
+            console.warn(`  ⚠️ Segment too short (${actualDuration}s), skipping`);
             continue;
-          } else {
-            segments.push(segmentBlob);
           }
           
-        } catch (segmentError) {
-          console.error(`❌ Segment ${i + 1} failed:`, segmentError);
-          console.log(`⚠️ Skipping failed segment ${i + 1}`);
-          continue;
+          console.log(`🎯 Video ${videoIndex + 1}, Beat ${i + 1}: ${startTime.toFixed(1)}s to ${endTime.toFixed(1)}s (${actualDuration.toFixed(1)}s)`);
+          
+          setCurrentStep(`Processing Video ${videoIndex + 1}/${videoFiles.length}, Segment ${i + 1}/${effectiveBeatPoints.length} (${actualDuration.toFixed(1)}s)...`);
+          
+          try {
+            const segmentBlob = await trimVideo(
+              videoFile, 
+              startTime, 
+              endTime
+            );
+            
+            if (segmentBlob && segmentBlob.size > 5000) { // At least 5KB
+              segments.push(segmentBlob);
+              console.log(`  ✅ Segment created: ${segmentBlob.size} bytes`);
+            } else {
+              console.warn(`  ⚠️ Segment too small, skipping`);
+            }
+            
+          } catch (segmentError) {
+            console.error(`❌ Segment failed:`, segmentError);
+            continue;
+          }
         }
       }
 
-      console.log(`🎬 All segments created. Total segments: ${segments.length}`);
-      console.log('Segment sizes:', segments.map(s => s.size));
+      console.log(`🎬 All segments created from ${videoFiles.length} videos!`);
+      console.log(`📊 Total segments: ${segments.length}`);
+      console.log('📹 Segment sizes:', segments.map((s, i) => `${i+1}: ${(s.size/1024).toFixed(1)}KB`));
+
+      if (segments.length === 0) {
+        throw new Error('No valid segments were created from any video');
+      }
+      
+      setActualSegmentsCreated(segments.length);
 
       setProgress(65);
       setCurrentStep('Combining segments into final video...');
@@ -614,10 +579,16 @@ export default function VideoProcessor({
         setProgress(75);
         setCurrentStep('🎵 Merging video with uploaded audio...');
         
+        console.log(`🎵 Starting audio merge process...`);
+        console.log(`📹 Final video size before audio: ${finalVideo.size} bytes`);
+        console.log(`🎵 Available audio files: ${audioFiles.length}`);
+        
         try {
           // Get audio file
           let audioFile: File | null = fileCache.get(audioFiles[0].id);
+          
           if (!audioFile) {
+            console.log('🔄 Audio file not in cache, fetching from URL');
             const response = await fetch(audioFiles[0].url);
             const audioBlob = await response.blob();
             audioFile = new File([audioBlob], audioFiles[0].name, { 
@@ -626,19 +597,32 @@ export default function VideoProcessor({
             fileCache.store(audioFiles[0].id, audioFile);
           }
           
-          finalVideo = await mergeVideoWithAudio(finalVideo, audioFile);
-          console.log('✅ Audio merged with video successfully');
+          console.log(`🎵 Using audio file: ${audioFile.name} (${(audioFile.size / 1024 / 1024).toFixed(1)}MB)`);
+          
+          // Merge audio with video
+          const videoWithAudio = await mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
+            const adjustedProgress = 75 + (progress * 0.2);
+            setProgress(adjustedProgress);
+          });
+          
+          if (videoWithAudio && videoWithAudio.size > 0) {
+            finalVideo = videoWithAudio;
+            console.log(`✅ Audio merge successful! Final size: ${finalVideo.size} bytes`);
+          } else {
+            console.log(`⚠️ Audio merge returned empty/invalid result, keeping original video`);
+          }
+          
         } catch (audioError) {
-          console.warn('⚠️ Audio merging failed, keeping video without audio:', audioError);
-          // Continue with video-only version
+          console.error('❌ Audio merging failed:', audioError);
+          console.log('🔄 Continuing with video-only result');
         }
+      } else {
+        console.log(`ℹ️ No audio files provided, skipping audio merge`);
       }
 
       console.log('🎬 Final video analysis:');
       console.log(`  - Size: ${finalVideo.size} bytes (${(finalVideo.size / 1024 / 1024).toFixed(2)} MB)`);
       console.log(`  - Type: ${finalVideo.type}`);
-      console.log(`  - Original video size: ${videoFile.size} bytes (${(videoFile.size / 1024 / 1024).toFixed(2)} MB)`);
-      console.log(`  - Size ratio: ${((finalVideo.size / videoFile.size) * 100).toFixed(1)}%`);
       
       // Validate the final video
       if (finalVideo.size === 0) {
@@ -662,8 +646,7 @@ export default function VideoProcessor({
         message: error.message,
         stack: error.stack,
         beatPointsCount: beatPoints.length,
-        videoFilesCount: videoFiles.length,
-        endTime: endTime
+        videoFilesCount: videoFiles.length
       });
       
       toast({
@@ -1020,7 +1003,8 @@ export default function VideoProcessor({
               </>
             ) : (
               <>
-                <div>✅ Video processed with {beatPoints.length} beat segments</div>
+                <div>✅ Video processed with {actualSegmentsCreated} segments from {videoFiles.length} videos</div>
+                <div>🎵 Beat-synced using {beatPoints.length} beat marks</div>
                 <div>📁 Saved to Firebase Storage</div>
                 <div>🎬 Ready for download and sharing</div>
               </>
