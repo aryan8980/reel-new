@@ -6,7 +6,12 @@ export default defineConfig({
   base: './',
   server: {
     host: '::',
-    port: 8080
+    port: 8080,
+    headers: {
+      // Only add these headers when needed for video processing
+      // 'Cross-Origin-Opener-Policy': 'same-origin',
+      // 'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
   },
   build: {
     outDir: 'dist',

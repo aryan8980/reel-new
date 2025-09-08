@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users can read and write their own profile
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Users can manage their own media files
+    match /mediaFiles/{mediaId} {
+      // Allow reading media files owned by the user
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      
+      // Allow creating media files where the user sets themselves as owner
+      allow create: if request.auth != null && 
+                    request.auth.uid == request.resource.data.userId;
+      
+      // Allow updating/deleting media files owned by the user
+      allow update, delete: if request.auth != null && 
+                            resource.data.userId == request.auth.uid;
+    }
+    
+    // Users can manage their own projects
+    match /projects/{projectId} {
+      allow read, write: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.userId;
+    }
+  }
+}

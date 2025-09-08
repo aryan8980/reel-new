@@ -13,11 +13,13 @@ import {
   Layers,
   Film,
   Cloud,
-  CheckCircle
+  CheckCircle,
+  Settings,
+  Bug
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { uploadVideoFile, MediaFile } from "@/lib/firebaseService";
-import { trimVideoSimple as trimVideo, concatenateVideos, initFFmpeg } from "@/lib/videoProcessorFixed";
+import { trimVideoSimple as trimVideo, concatenateVideos, initFFmpeg, mergeVideoWithAudio } from "@/lib/customVideoProcessor";
 import { fileCache } from "@/lib/fileCache";
 import { firebaseML, VideoSegment } from "@/lib/firebaseML";
 import * as BeatDetection from "@/lib/beatDetection";
@@ -136,6 +138,49 @@ export default function VideoProcessor({
       toast({
         title: "Debug Test Failed", 
         description: error.message,
+        variant: "destructive"
+      });
+    } finally {
+      setIsProcessing(false);
+      setTimeout(() => {
+        setProgress(0);
+        setCurrentStep('');
+      }, 3000);
+    }
+  };
+
+  // Simple FFmpeg connection test
+  const testFFmpegConnection = async () => {
+    try {
+      setIsProcessing(true);
+      setProgress(0);
+      setCurrentStep('🧪 Testing Real FFmpeg Video Processor...');
+
+      console.log('🧪 Testing Real FFmpeg Video Processor...');
+      
+      setProgress(50);
+      
+      // Test the real FFmpeg processor
+      const ffmpegInstance = await initFFmpeg();
+      
+      if (ffmpegInstance) {
+        console.log('✅ Custom Video Processor working!');
+        setCurrentStep('✅ Custom Video Processor ready!');
+        setProgress(100);
+        
+        toast({
+          title: "SUCCESS! 🎉 Custom Processor",
+          description: "Custom video processing ready! Built with pure JavaScript - no external dependencies!",
+        });
+      } else {
+        throw new Error('Custom Video Processor not ready');
+      }
+
+    } catch (error) {
+      console.error('❌ FFmpeg test failed:', error);
+      toast({
+        title: "FFmpeg Test Failed",
+        description: `Error: ${error.message}. The stable version should work - please check browser console.`,
         variant: "destructive"
       });
     } finally {
@@ -272,13 +317,25 @@ export default function VideoProcessor({
       setCurrentStep('🎨 AI is combining segments into final masterpiece...');
       
       // Concatenate segments
-      const finalVideo = await concatenateVideos(segments, (progress) => {
-        const adjustedProgress = 80 + (progress * 0.15);
+      let finalVideo = await concatenateVideos(segments, (progress) => {
+        const adjustedProgress = 80 + (progress * 0.1);
         setProgress(adjustedProgress);
       });
       
       if (!finalVideo) {
         throw new Error('Failed to concatenate AI-selected segments');
+      }
+      
+      // Step 5: Merge with uploaded audio
+      setProgress(90);
+      setCurrentStep('🎵 Merging video with your uploaded audio...');
+      
+      try {
+        finalVideo = await mergeVideoWithAudio(finalVideo, audioFileObj);
+        console.log('✅ Audio merged with video successfully');
+      } catch (audioError) {
+        console.warn('⚠️ Audio merging failed, keeping video without audio:', audioError);
+        // Continue with video-only version
       }
       
       setProcessedVideo(finalVideo);
@@ -330,12 +387,26 @@ export default function VideoProcessor({
     setProgress(0);
     
     try {
-      // Initialize FFmpeg
+      // Initialize FFmpeg with retry mechanism
       setCurrentStep('Initializing video processor...');
-      console.log('Starting FFmpeg initialization...');
+      console.log('🔄 Starting FFmpeg initialization...');
       
-      const ffmpegInstance = await initFFmpeg();
-      console.log('FFmpeg initialized successfully');
+      let ffmpegInstance;
+      try {
+        ffmpegInstance = await initFFmpeg();
+        console.log('✅ Custom Video Processor initialized successfully');
+      } catch (ffmpegError) {
+        console.error('❌ Custom Video Processor initialization failed:', ffmpegError);
+        
+        // Show user-friendly error message
+        toast({
+          title: "Video Processor Initialization Failed",
+          description: "Unable to load video processing engine. This might be due to network issues or browser compatibility. Please try refreshing the page or using a different browser.",
+          variant: "destructive"
+        });
+        
+        throw new Error(`FFmpeg initialization failed: ${ffmpegError.message}`);
+      }
       
       setProgress(15);
       setCurrentStep('Loading video file...');
@@ -444,20 +515,42 @@ export default function VideoProcessor({
       for (let i = 0; i < effectiveBeatPoints.length; i++) {
         const beatTime = effectiveBeatPoints[i];
         
-        // IMPROVED LOGIC: Create segments that make more sense for beat editing
-        // Option 1: Lead up to beat (better for music sync)
-        // Option 2: Center around beat (better for action moments)
+        // CORRECTED LOGIC: User wants segments that lead UP TO beats
+        // This creates segments that END on the beat (the "before beat mark" part)
+        // Example: Beat at 10s → Segment from 8s to 10s (2 seconds leading to the beat)
         
         const segmentDuration = 2.0; // 2 second segments
+        const useLeadUpToBeat = true; // TRUE = segments end ON beats (before beat mark part) ✅
         
-        // Try "lead up to beat" approach first (this is usually what users want)
-        let startTime = Math.max(0, beatTime - segmentDuration);
-        let endTime = Math.min(finalEndTime, beatTime);
+        let startTime: number;
+        let endTime: number;
         
-        // If we're at the beginning and can't go back, go forward instead
-        if (startTime === 0 && beatTime < segmentDuration) {
+        if (useLeadUpToBeat) {
+          // DEFAULT: Segments end on the beat (good for build-up effects)
+          startTime = Math.max(0, beatTime - segmentDuration);
+          endTime = Math.min(finalEndTime, beatTime);
+          
+          // If we're at the beginning and can't go back, go forward instead
+          if (startTime === 0 && beatTime < segmentDuration) {
+            endTime = Math.min(finalEndTime, beatTime + segmentDuration);
+          }
+        } else {
+          // ALTERNATIVE: Segments start on the beat (good for beat-driven action)
+          startTime = beatTime;
           endTime = Math.min(finalEndTime, beatTime + segmentDuration);
+          
+          // If we can't go forward enough, go backward
+          if (endTime - startTime < segmentDuration * 0.5) {
+            startTime = Math.max(0, beatTime - segmentDuration);
+            endTime = beatTime;
+          }
         }
+        
+        console.log(`🎵 Beat segment mode: ${useLeadUpToBeat ? 'LEAD-UP (before beat mark - ends on beat) ✅' : 'START-FROM (after beat mark - starts on beat)'}`);
+        
+        // Remove old commented code since we now have the correct logic
+        // let startTime = Math.max(0, beatTime - segmentDuration);
+        // let endTime = Math.min(finalEndTime, beatTime);
         
         const actualDuration = endTime - startTime;
         
@@ -511,10 +604,35 @@ export default function VideoProcessor({
       setCurrentStep('Combining segments into final video...');
 
       // Concatenate all segments into final video
-      const finalVideo = await concatenateVideos(segments, (progress) => {
-        const adjustedProgress = 65 + (progress * 0.15);
+      let finalVideo = await concatenateVideos(segments, (progress) => {
+        const adjustedProgress = 65 + (progress * 0.1);
         setProgress(adjustedProgress);
       });
+
+      // Add audio merging if audio files are available
+      if (audioFiles && audioFiles.length > 0) {
+        setProgress(75);
+        setCurrentStep('🎵 Merging video with uploaded audio...');
+        
+        try {
+          // Get audio file
+          let audioFile: File | null = fileCache.get(audioFiles[0].id);
+          if (!audioFile) {
+            const response = await fetch(audioFiles[0].url);
+            const audioBlob = await response.blob();
+            audioFile = new File([audioBlob], audioFiles[0].name, { 
+              type: audioFiles[0].mimeType || 'audio/mp3' 
+            });
+            fileCache.store(audioFiles[0].id, audioFile);
+          }
+          
+          finalVideo = await mergeVideoWithAudio(finalVideo, audioFile);
+          console.log('✅ Audio merged with video successfully');
+        } catch (audioError) {
+          console.warn('⚠️ Audio merging failed, keeping video without audio:', audioError);
+          // Continue with video-only version
+        }
+      }
 
       console.log('🎬 Final video analysis:');
       console.log(`  - Size: ${finalVideo.size} bytes (${(finalVideo.size / 1024 / 1024).toFixed(2)} MB)`);
@@ -534,7 +652,7 @@ export default function VideoProcessor({
       setProcessedVideo(finalVideo);
       
       // Upload to Firebase
-      await uploadProcessedVideo(finalVideo, 80);
+      await uploadProcessedVideo(finalVideo, 85);
       
     } catch (error) {
       console.error('❌ Video processing failed:', error);
@@ -733,7 +851,27 @@ export default function VideoProcessor({
           </div>
 
           {/* Debug Test Button */}
-          <div className="flex justify-center">
+          <div className="flex justify-center gap-2">
+            <Button 
+              onClick={testFFmpegConnection}
+              disabled={isProcessing}
+              variant="outline"
+              size="sm"
+              className="border-dashed border-blue-300 text-blue-700 hover:bg-blue-50"
+            >
+              {isProcessing ? (
+                <>
+                  <Loader2 className="h-3 w-3 mr-2 animate-spin" />
+                  Testing...
+                </>
+              ) : (
+                <>
+                  <Settings className="h-3 w-3 mr-2" />
+                  Test FFmpeg
+                </>
+              )}
+            </Button>
+
             <Button 
               onClick={testTrimming}
               disabled={isProcessing || videoFiles.length === 0}

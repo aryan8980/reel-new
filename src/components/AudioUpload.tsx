@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Music, Upload, X, Play, Pause, Cloud, CheckCircle, AlertCircle } from "lucide-react";
+import { Music, Upload, X, Play, Pause, Cloud, CheckCircle, AlertCircle, Bug } from "lucide-react";
 import { uploadAudioFile, UploadProgress, MediaFile, testStorageConnection } from "@/lib/firebaseService";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -19,15 +19,52 @@ const AudioUpload = ({ onAudioUpload, audioFile, projectId }: AudioUploadProps) 
   const [uploading, setUploading] = useState<UploadProgress | null>(null);
   const { user } = useAuth();
 
+  // Debug function to test Firebase connection
+  const debugConnection = async () => {
+    console.log('🔍 DEBUGGING AUDIO UPLOAD CONNECTION');
+    console.log('===================================');
+    
+    // Check authentication
+    console.log('🔐 Authentication Status:');
+    console.log('  User:', user ? 'Authenticated ✅' : 'Not authenticated ❌');
+    if (user) {
+      console.log('  User ID:', user.uid);
+      console.log('  Email:', user.email);
+    }
+    
+    // Test storage connection
+    console.log('🔥 Firebase Storage Test:');
+    try {
+      const storageConnected = await testStorageConnection();
+      console.log('  Storage Connection:', storageConnected ? 'Success ✅' : 'Failed ❌');
+    } catch (error) {
+      console.error('  Storage Error:', error);
+    }
+    
+    alert('Debug results logged to console. Press F12 to view.');
+  };
+
   const handleFileSelect = async (file: File) => {
+    console.log('🎵 Audio upload attempt:', {
+      fileName: file.name,
+      fileType: file.type,
+      fileSize: file.size,
+      isAudio: file.type.startsWith('audio/')
+    });
+
     if (!file.type.startsWith('audio/')) {
+      console.error('❌ Not an audio file:', file.type);
+      alert('Please select an audio file (MP3, WAV, M4A, etc.)');
       return;
     }
 
     if (!user) {
+      console.error('❌ No authenticated user');
       alert('Please sign in to upload audio');
       return;
     }
+
+    console.log('✅ User authenticated:', user.uid, user.email);
 
     try {
       setUploading({
@@ -36,14 +73,17 @@ const AudioUpload = ({ onAudioUpload, audioFile, projectId }: AudioUploadProps) 
         status: 'uploading'
       });
 
+      console.log('🚀 Starting audio upload...');
       const uploadedFile = await uploadAudioFile(
         file,
         (progress) => {
+          console.log('📈 Upload progress:', progress);
           setUploading(progress);
         },
         projectId
       );
 
+      console.log('✅ Audio upload successful:', uploadedFile);
       onAudioUpload(uploadedFile);
 
       // Remove upload state after a brief delay
@@ -52,13 +92,31 @@ const AudioUpload = ({ onAudioUpload, audioFile, projectId }: AudioUploadProps) 
       }, 2000);
 
     } catch (error) {
-      console.error('Audio upload failed:', error);
+      console.error('❌ Audio upload failed:', error);
+      
+      let errorMessage = 'Upload failed';
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      }
+      
+      console.error('Full error details:', {
+        message: errorMessage,
+        error: error,
+        user: user?.uid,
+        fileName: file.name,
+        fileType: file.type,
+        fileSize: file.size
+      });
+      
       setUploading({
         fileName: file.name,
         progress: 0,
         status: 'error',
-        error: error instanceof Error ? error.message : 'Upload failed'
+        error: errorMessage
       });
+      
+      // Show alert with specific error
+      alert(`Audio upload failed: ${errorMessage}`);
     }
   };
 
@@ -153,6 +211,15 @@ const AudioUpload = ({ onAudioUpload, audioFile, projectId }: AudioUploadProps) 
                 <p className="text-xs text-muted-foreground mt-2">
                   Supports MP3, WAV, M4A files • {user ? 'File will be saved to your account' : 'Sign in to save files'}
                 </p>
+                <Button
+                  variant="ghost"
+                  onClick={debugConnection}
+                  className="mt-3 text-xs"
+                  size="sm"
+                >
+                  <Bug className="w-3 h-3 mr-2" />
+                  Debug Upload Issue
+                </Button>
               </div>
             </div>
           </div>
@@ -219,6 +286,16 @@ const AudioUpload = ({ onAudioUpload, audioFile, projectId }: AudioUploadProps) 
             >
               <Upload className="w-4 h-4 mr-2" />
               Replace Audio
+            </Button>
+            
+            <Button
+              variant="ghost"
+              onClick={debugConnection}
+              className="w-full mt-2 text-xs"
+              size="sm"
+            >
+              <Bug className="w-3 h-3 mr-2" />
+              Debug Upload Issue
             </Button>
           </div>
         )}
