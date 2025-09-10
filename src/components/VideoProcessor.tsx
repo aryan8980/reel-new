@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { uploadVideoFile, MediaFile } from "@/lib/firebaseService";
-import { trimVideoSimple as trimVideo, concatenateVideos, initFFmpeg, mergeVideoWithAudio } from "@/lib/customVideoProcessor";
+import { trimVideoSimple as trimVideo, concatenateVideos, initFFmpeg } from "@/lib/customVideoProcessor";
+import { SafeAudioMixer } from "@/lib/safeAudioMixer";
 import { fileCache } from "@/lib/fileCache";
 import { firebaseML, VideoSegment } from "@/lib/firebaseML";
 import * as BeatDetection from "@/lib/beatDetection";
@@ -57,6 +58,9 @@ export default function VideoProcessor({
   const [useMLAnalysis, setUseMLAnalysis] = useState(false);
   const [mlAnalysisResults, setMlAnalysisResults] = useState<any>(null);
   const [actualSegmentsCreated, setActualSegmentsCreated] = useState(0);
+  
+  // Initialize SAFE audio mixer - guarantees video processing works
+  const audioMixer = new SafeAudioMixer();
 
   // Debug test function to understand trimming behavior
   const testTrimming = async () => {
@@ -332,14 +336,21 @@ export default function VideoProcessor({
       setCurrentStep('🎵 Merging video with your uploaded audio...');
       
       try {
-        finalVideo = await mergeVideoWithAudio(finalVideo, audioFileObj);
-        console.log('✅ Audio merged with video successfully');
+        finalVideo = await audioMixer.mergeVideoWithAudio(finalVideo, audioFileObj);
+        console.log('🎉 Audio processed with SAFE method - video guaranteed!');
       } catch (audioError) {
         console.warn('⚠️ Audio merging failed, keeping video without audio:', audioError);
         // Continue with video-only version
       }
       
+      console.log('🎯 AI PROCESSING - SETTING PROCESSED VIDEO:', {
+        size: finalVideo.size,
+        sizeMB: (finalVideo.size / 1024 / 1024).toFixed(2),
+        type: finalVideo.type
+      });
+      
       setProcessedVideo(finalVideo);
+      console.log('✅ AI processed video state updated!');
       setProgress(95);
       
       // Upload to Firebase
@@ -366,6 +377,13 @@ export default function VideoProcessor({
   };
 
   const processVideo = async () => {
+    console.log('🎬 STARTING VIDEO PROCESSING');
+    console.log('📊 Input check:', {
+      videoCount: videoFiles.length,
+      beatPointsCount: beatPoints.length,
+      audioFilesCount: audioFiles.length
+    });
+    
     if (videoFiles.length === 0) {
       toast({
         title: "No Videos",
@@ -386,8 +404,10 @@ export default function VideoProcessor({
 
     setIsProcessing(true);
     setProgress(0);
+    console.log('🔄 Processing state set, progress reset');
     
     try {
+      console.log('🎯 Entering main processing try block');
       // Initialize FFmpeg with retry mechanism
       setCurrentStep('Initializing video processor...');
       console.log('🔄 Starting FFmpeg initialization...');
@@ -599,17 +619,27 @@ export default function VideoProcessor({
           
           console.log(`🎵 Using audio file: ${audioFile.name} (${(audioFile.size / 1024 / 1024).toFixed(1)}MB)`);
           
-          // Merge audio with video
-          const videoWithAudio = await mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
+          // Merge audio with video using SAFE mixer (video processing guaranteed!)
+          console.log(`� Starting ULTIMATE audio merge - will try ALL possible methods...`);
+          const videoWithAudio = await audioMixer.mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
             const adjustedProgress = 75 + (progress * 0.2);
             setProgress(adjustedProgress);
+            console.log(`🎵 Audio merge progress: ${Math.round(progress)}%`);
+          });
+          
+          console.log(`📊 Audio merge result:`, {
+            originalVideoSize: finalVideo.size,
+            mergedVideoSize: videoWithAudio?.size || 0,
+            success: !!(videoWithAudio && videoWithAudio.size > 0)
           });
           
           if (videoWithAudio && videoWithAudio.size > 0) {
             finalVideo = videoWithAudio;
             console.log(`✅ Audio merge successful! Final size: ${finalVideo.size} bytes`);
+            console.log(`🎵 Video now has audio track merged!`);
           } else {
             console.log(`⚠️ Audio merge returned empty/invalid result, keeping original video`);
+            console.log(`💡 This might be due to browser compatibility - the video will work but without merged audio`);
           }
           
         } catch (audioError) {
@@ -633,7 +663,14 @@ export default function VideoProcessor({
         console.warn('⚠️ Final video is very small - might not contain actual content');
       }
       
+      console.log('🎯 SETTING PROCESSED VIDEO:', {
+        size: finalVideo.size,
+        sizeMB: (finalVideo.size / 1024 / 1024).toFixed(2),
+        type: finalVideo.type
+      });
+      
       setProcessedVideo(finalVideo);
+      console.log('✅ Processed video state updated!');
       
       // Upload to Firebase
       await uploadProcessedVideo(finalVideo, 85);
