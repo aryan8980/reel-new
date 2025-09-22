@@ -143,11 +143,25 @@ export class SafeAudioMixer {
     // Combine
     const combinedStream = new MediaStream();
     videoStream.getVideoTracks().forEach(track => combinedStream.addTrack(track));
-    // If we successfully created an audioDestination, use its tracks, otherwise try to let audio element be captured by browser
+    // If we successfully created an audioDestination, use its tracks.
+    // Otherwise try audio.captureStream() (supported in many browsers) as a fallback.
     if (audioDestination && audioDestination.stream.getAudioTracks().length > 0) {
       audioDestination.stream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
     } else {
-      console.warn('⚠️ No audio tracks from WebAudio destination; combined stream will not include audio from WebAudio');
+      console.warn('⚠️ No audio tracks from WebAudio destination; trying audio.captureStream() fallback if available');
+      try {
+        // audio.captureStream() may throw if not supported or if audio element isn't allowed
+        // Note: captureStream may require the element to be playing
+        const audioCaptureStream = (audio as any).captureStream ? (audio as any).captureStream() : null;
+        if (audioCaptureStream && audioCaptureStream.getAudioTracks().length > 0) {
+          console.log('✅ audio.captureStream() provided audio tracks:', audioCaptureStream.getAudioTracks().length);
+          audioCaptureStream.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+        } else {
+          console.warn('❌ audio.captureStream() did not provide audio tracks');
+        }
+      } catch (e) {
+        console.warn('audio.captureStream() fallback failed:', e);
+      }
     }
     
     console.log('🔗 Stream combined:', {
@@ -155,6 +169,30 @@ export class SafeAudioMixer {
       audio: combinedStream.getAudioTracks().length,
       audioDestinationAvailable: !!audioDestination
     });
+
+    // If there are no audio tracks yet, wait briefly for playback to start and for capture to settle
+    const waitForAudioTracks = async (timeoutMs = 1200) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (combinedStream.getAudioTracks().length > 0) return true;
+        await new Promise(r => setTimeout(r, 120));
+      }
+      return combinedStream.getAudioTracks().length > 0;
+    };
+
+    const haveAudio = await waitForAudioTracks(2000);
+    if (!haveAudio) {
+      console.warn('⏱️ No audio tracks present after wait; attempting one last audio.captureStream() check.');
+      try {
+        const lastResort = (audio as any).captureStream ? (audio as any).captureStream() : null;
+        if (lastResort && lastResort.getAudioTracks().length > 0) {
+          lastResort.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+          console.log('✅ Last-resort audio.captureStream() yielded tracks');
+        }
+      } catch (e) {
+        console.warn('Last-resort captureStream failed:', e);
+      }
+    }
 
     if (onProgress) onProgress(60);
     
@@ -164,6 +202,22 @@ export class SafeAudioMixer {
     let selectedCodec = codecCandidates.find(c => MediaRecorder.isTypeSupported(c));
     if (!selectedCodec) selectedCodec = 'video/webm';
     console.log('📦 Using MediaRecorder mimeType:', selectedCodec);
+
+    // Wait for audio tracks to appear before starting MediaRecorder when possible
+    const ensureAudioBeforeStart = async (timeoutMs = 2500) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (combinedStream.getAudioTracks().length > 0) return true;
+        await new Promise(r => setTimeout(r, 150));
+      }
+      return combinedStream.getAudioTracks().length > 0;
+    };
+
+    const audioReady = await ensureAudioBeforeStart(2500);
+
+    if (!audioReady) {
+      console.warn('⚠️ Audio tracks are still missing after wait. Proceeding with fallback behavior.');
+    }
 
     const mediaRecorder = new MediaRecorder(combinedStream, {
       mimeType: selectedCodec
@@ -192,7 +246,12 @@ export class SafeAudioMixer {
       }, 15000);
     });
     
-    // Start everything - start mediaRecorder before playback to capture initial audio
+    // Start recorder only if audio exists or we've accepted the fallback path
+    if (combinedStream.getAudioTracks().length === 0) {
+      console.warn('Starting MediaRecorder with NO audio tracks. Final file will be silent.');
+      // If the app requires audio strongly, we could throw here; instead we'll proceed and let caller handle
+    }
+
     try {
       mediaRecorder.start(200);
     } catch (e) {
