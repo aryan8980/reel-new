@@ -194,6 +194,33 @@ export class SafeAudioMixer {
       }
     }
 
+    // If still no audio tracks, attempt a robust fallback: decode the audio file into an AudioBuffer
+    // and play it through a MediaStreamAudioDestinationNode so we can attach its tracks.
+    let bufferSourceFallback: AudioBufferSourceNode | null = null;
+    let bufferDestination: MediaStreamAudioDestinationNode | null = null;
+    if (combinedStream.getAudioTracks().length === 0) {
+      console.log('🔁 Attempting AudioBuffer fallback (decode + bufferSource)');
+      try {
+        const audioData = await audioFile.arrayBuffer();
+        // decodeAudioData can reject on malformed data
+        const decoded = await audioContext.decodeAudioData(audioData.slice(0));
+        bufferSourceFallback = audioContext.createBufferSource();
+        bufferSourceFallback.buffer = decoded;
+        bufferDestination = audioContext.createMediaStreamDestination();
+        bufferSourceFallback.connect(bufferDestination);
+        bufferSourceFallback.start(0);
+        // attach tracks
+        if (bufferDestination.stream.getAudioTracks().length > 0) {
+          bufferDestination.stream.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+          console.log('✅ AudioBuffer fallback produced audio tracks:', bufferDestination.stream.getAudioTracks().length);
+        } else {
+          console.warn('❌ AudioBuffer fallback did not produce audio tracks');
+        }
+      } catch (e) {
+        console.warn('AudioBuffer fallback failed:', e);
+      }
+    }
+
     if (onProgress) onProgress(60);
     
     // Record
@@ -298,13 +325,14 @@ export class SafeAudioMixer {
     
     const result = await recordingPromise;
 
-    // Cleanup: remove appended DOM elements and revoke URLs
+  // Cleanup: remove appended DOM elements and revoke URLs. Also stop any bufferSourceFallback.
     try { URL.revokeObjectURL(videoUrl); } catch {}
     try { URL.revokeObjectURL(audioUrl); } catch {}
     try { if (audio && audio.parentElement) audio.parentElement.removeChild(audio); } catch {}
     try { if (video && video.parentElement) video.parentElement.removeChild(video); } catch {}
     try { if (this.canvas.parentElement) this.canvas.parentElement.removeChild(this.canvas); } catch {}
-    try { audioContext.close(); } catch {}
+  try { if (bufferSourceFallback) { bufferSourceFallback.stop(); } } catch {}
+  try { audioContext.close(); } catch {}
     combinedStream.getTracks().forEach(track => track.stop());
 
     if (onProgress) onProgress(100);
