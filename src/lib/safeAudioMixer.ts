@@ -254,123 +254,107 @@ export class SafeAudioMixer {
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
-    
+
+    // Ensure playback starts before we attempt to detect audio tracks
+    video.currentTime = 0;
+    audio.currentTime = 0;
+    try {
+      await Promise.all([video.play(), audio.play()]);
+      console.log('▶️ Playback started for video and audio');
+    } catch (e) {
+      console.warn('Playback failed (autoplay policy?):', e);
+    }
+
+    // After starting playback, wait for audio tracks (they are more likely to appear now)
+    const audioReadyAfterPlay = await ensureAudioBeforeStart(2500);
+    if (!audioReadyAfterPlay) {
+      console.warn('⚠️ Audio tracks still missing after attempting playback');
+    }
+
+    // Start recording: wrap onstop to handle timeout deterministically
+    let timedOut = false;
     const recordingPromise = new Promise<Blob>((resolve, reject) => {
       mediaRecorder.onstop = () => {
+        if (timedOut) {
+          reject(new Error('Recording timeout'));
+          return;
+        }
         if (chunks.length === 0) {
           reject(new Error('No chunks recorded'));
           return;
         }
         resolve(new Blob(chunks, { type: 'video/webm' }));
       };
-      
-      // 15 second timeout
+
+      // 15 second timeout -> stop recorder and flag timed out
       setTimeout(() => {
         if (mediaRecorder.state === 'recording') {
-          mediaRecorder.stop();
-          reject(new Error('Recording timeout'));
+          timedOut = true;
+          try { mediaRecorder.stop(); } catch (e) { console.warn('Stop after timeout failed:', e); }
         }
       }, 15000);
     });
-    
-    // Start recorder only if audio exists or we've accepted the fallback path
-    if (combinedStream.getAudioTracks().length === 0) {
-      console.warn('Starting MediaRecorder with NO audio tracks. Final file will be silent.');
-      // If the app requires audio strongly, we could throw here; instead we'll proceed and let caller handle
+
+    // Before starting recorder, do the RMS analyser check if audio tracks exist
+    try {
+      if (combinedStream.getAudioTracks().length > 0) {
+        const checkCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const src = checkCtx.createMediaStreamSource(new MediaStream(combinedStream.getAudioTracks()));
+        const analyser = checkCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        src.connect(analyser);
+
+        const data = new Float32Array(analyser.fftSize);
+        const rms = () => {
+          try { analyser.getFloatTimeDomainData(data); } catch (e) { return 0; }
+          let sum = 0; for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+          return Math.sqrt(sum / data.length);
+        };
+
+        // give it a short moment to collect
+        await new Promise(r => setTimeout(r, 120 * 6));
+        const maxRms = rms();
+        if (maxRms <= 0.001) {
+          console.warn('🔇 Audio tracks present but appear silent (RMS:', maxRms, ').');
+          // Attempt final decode fallback if we didn't already try buffer fallback
+          try {
+            if (!bufferDestination) {
+              console.log('🔁 Performing final decode fallback due to silent RMS');
+              const audioData = await audioFile.arrayBuffer();
+              const decoded = await (checkCtx as AudioContext).decodeAudioData(audioData.slice(0));
+              const bs = (checkCtx as AudioContext).createBufferSource();
+              const bd = (checkCtx as AudioContext).createMediaStreamDestination();
+              bs.buffer = decoded;
+              bs.connect(bd);
+              bs.start(0);
+              if (bd.stream.getAudioTracks().length > 0) {
+                bd.stream.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+                console.log('✅ Final decode fallback produced audio tracks');
+              } else {
+                console.warn('❌ Final decode fallback produced no tracks');
+              }
+              try { bs.stop(); } catch {}
+            }
+          } catch (e) {
+            console.warn('Final decode fallback failed:', e);
+          }
+        } else {
+          console.log('🔊 Audio energy detected (max RMS):', maxRms);
+        }
+        try { checkCtx.close(); } catch {}
+      }
+    } catch (e) {
+      console.warn('Analyser/RMS check failed:', e);
     }
 
     try {
-      // Before starting recorder, if audio tracks exist, do a short RMS check to ensure they're not silent
-      let analyser: AnalyserNode | null = null;
-      let analyserInterval: any = null;
-      try {
-        if (combinedStream.getAudioTracks().length > 0) {
-          const checkCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const src = checkCtx.createMediaStreamSource(new MediaStream(combinedStream.getAudioTracks()));
-          analyser = checkCtx.createAnalyser();
-          analyser.fftSize = 2048;
-          src.connect(analyser);
-
-          const data = new Float32Array(analyser.fftSize);
-          const rms = () => {
-            try {
-              analyser!.getFloatTimeDomainData(data);
-            } catch (e) {
-              return 0;
-            }
-            let sum = 0;
-            for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-            return Math.sqrt(sum / data.length);
-          };
-
-          // sample RMS a few times while playback starts
-          let samples = 0;
-          let maxRms = 0;
-          analyserInterval = setInterval(() => {
-            const val = rms();
-            maxRms = Math.max(maxRms, val);
-            samples++;
-            // if we see sufficient energy early we can proceed
-            if (maxRms > 0.001 || samples > 8) {
-              clearInterval(analyserInterval);
-            }
-          }, 120);
-          // give it a short moment to collect
-          await new Promise(r => setTimeout(r, 120 * 6));
-          try { if (analyserInterval) clearInterval(analyserInterval); } catch {}
-
-          if (maxRms <= 0.001) {
-            console.warn('🔇 Audio tracks present but appear silent (RMS:', maxRms, ').');
-            // Attempt one last decode fallback if we didn't already try buffer fallback
-            try {
-              if (!bufferDestination) {
-                console.log('🔁 Performing final decode fallback due to silent RMS');
-                const audioData = await audioFile.arrayBuffer();
-                const decoded = await (checkCtx as AudioContext).decodeAudioData(audioData.slice(0));
-                const bs = (checkCtx as AudioContext).createBufferSource();
-                const bd = (checkCtx as AudioContext).createMediaStreamDestination();
-                bs.buffer = decoded;
-                bs.connect(bd);
-                bs.start(0);
-                if (bd.stream.getAudioTracks().length > 0) {
-                  bd.stream.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
-                  console.log('✅ Final decode fallback produced audio tracks');
-                } else {
-                  console.warn('❌ Final decode fallback produced no tracks');
-                }
-                try { bs.stop(); } catch {}
-              }
-            } catch (e) {
-              console.warn('Final decode fallback failed:', e);
-            }
-          } else {
-            console.log('🔊 Audio energy detected (max RMS):', maxRms);
-          }
-          try { checkCtx.close(); } catch {}
-        }
-      } catch (e) {
-        console.warn('Analyser/RMS check failed:', e);
-      }
-
       mediaRecorder.start(200);
     } catch (e) {
       console.error('MediaRecorder.start failed:', e);
-      // cleanup appended elements
       try { if (audio && audio.parentElement) audio.parentElement.removeChild(audio); } catch {};
       try { if (video && video.parentElement) video.parentElement.removeChild(video); } catch {};
       try { if (this.canvas.parentElement) this.canvas.parentElement.removeChild(this.canvas); } catch {}
       throw e;
-    }
-
-    video.currentTime = 0;
-    audio.currentTime = 0;
-
-    // Play - may require user gesture (typically the process button is clicked by user)
-    try {
-      await Promise.all([video.play(), audio.play()]);
-    } catch (e) {
-      // playback may fail due to autoplay policy; log and continue - recorder may still capture
-      console.warn('Playback failed (autoplay policy?):', e);
     }
     
     if (onProgress) onProgress(80);
