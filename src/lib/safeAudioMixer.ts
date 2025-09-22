@@ -280,6 +280,78 @@ export class SafeAudioMixer {
     }
 
     try {
+      // Before starting recorder, if audio tracks exist, do a short RMS check to ensure they're not silent
+      let analyser: AnalyserNode | null = null;
+      let analyserInterval: any = null;
+      try {
+        if (combinedStream.getAudioTracks().length > 0) {
+          const checkCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const src = checkCtx.createMediaStreamSource(new MediaStream(combinedStream.getAudioTracks()));
+          analyser = checkCtx.createAnalyser();
+          analyser.fftSize = 2048;
+          src.connect(analyser);
+
+          const data = new Float32Array(analyser.fftSize);
+          const rms = () => {
+            try {
+              analyser!.getFloatTimeDomainData(data);
+            } catch (e) {
+              return 0;
+            }
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+            return Math.sqrt(sum / data.length);
+          };
+
+          // sample RMS a few times while playback starts
+          let samples = 0;
+          let maxRms = 0;
+          analyserInterval = setInterval(() => {
+            const val = rms();
+            maxRms = Math.max(maxRms, val);
+            samples++;
+            // if we see sufficient energy early we can proceed
+            if (maxRms > 0.001 || samples > 8) {
+              clearInterval(analyserInterval);
+            }
+          }, 120);
+          // give it a short moment to collect
+          await new Promise(r => setTimeout(r, 120 * 6));
+          try { if (analyserInterval) clearInterval(analyserInterval); } catch {}
+
+          if (maxRms <= 0.001) {
+            console.warn('🔇 Audio tracks present but appear silent (RMS:', maxRms, ').');
+            // Attempt one last decode fallback if we didn't already try buffer fallback
+            try {
+              if (!bufferDestination) {
+                console.log('🔁 Performing final decode fallback due to silent RMS');
+                const audioData = await audioFile.arrayBuffer();
+                const decoded = await (checkCtx as AudioContext).decodeAudioData(audioData.slice(0));
+                const bs = (checkCtx as AudioContext).createBufferSource();
+                const bd = (checkCtx as AudioContext).createMediaStreamDestination();
+                bs.buffer = decoded;
+                bs.connect(bd);
+                bs.start(0);
+                if (bd.stream.getAudioTracks().length > 0) {
+                  bd.stream.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+                  console.log('✅ Final decode fallback produced audio tracks');
+                } else {
+                  console.warn('❌ Final decode fallback produced no tracks');
+                }
+                try { bs.stop(); } catch {}
+              }
+            } catch (e) {
+              console.warn('Final decode fallback failed:', e);
+            }
+          } else {
+            console.log('🔊 Audio energy detected (max RMS):', maxRms);
+          }
+          try { checkCtx.close(); } catch {}
+        }
+      } catch (e) {
+        console.warn('Analyser/RMS check failed:', e);
+      }
+
       mediaRecorder.start(200);
     } catch (e) {
       console.error('MediaRecorder.start failed:', e);
