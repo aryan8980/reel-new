@@ -700,8 +700,12 @@ export default function VideoProcessor({
     setCurrentStep('Uploading to cloud storage...');
     setProgress(startProgress);
     
-    const fileName = `processed_video_${Date.now()}.mp4`;
-    const processedFile = new File([videoBlob], fileName, { type: 'video/mp4' });
+    // Use the actual blob type from MediaRecorder (usually video/webm)
+    const detectedType = videoBlob.type || 'video/webm';
+    const isWebM = detectedType.includes('webm');
+    const ext = isWebM ? 'webm' : (detectedType.includes('mp4') ? 'mp4' : 'webm');
+    const fileName = `processed_video_${Date.now()}.${ext}`;
+    const processedFile = new File([videoBlob], fileName, { type: detectedType });
     
     const uploadedVideoFile = await uploadVideoFile(
       processedFile,
@@ -714,8 +718,8 @@ export default function VideoProcessor({
       `processed_videos_${Date.now()}`
     );
     
-    setProcessedVideoFile(uploadedVideoFile);
-    setPreviewUrl(uploadedVideoFile.url);
+  setProcessedVideoFile(uploadedVideoFile);
+  setPreviewUrl(uploadedVideoFile.url);
     
     setProgress(100);
     setCurrentStep('Processing complete!');
@@ -736,7 +740,12 @@ export default function VideoProcessor({
       const url = URL.createObjectURL(processedVideo);
       const a = document.createElement('a');
       a.href = url;
-      a.download = processedVideoFile.name;
+      // Ensure file extension matches blob type when downloading locally
+      const blobType = processedVideo.type || 'video/webm';
+      const isWebM = blobType.includes('webm');
+      const desiredExt = isWebM ? 'webm' : (blobType.includes('mp4') ? 'mp4' : 'webm');
+      const base = processedVideoFile.name.replace(/\.(mp4|webm)$/i, '');
+      a.download = `${base}.${desiredExt}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
