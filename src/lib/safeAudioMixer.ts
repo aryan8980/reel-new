@@ -6,6 +6,11 @@ export class SafeAudioMixer {
   constructor() {
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d')!;
+    // keep canvas offscreen by default
+    this.canvas.style.position = 'fixed';
+    this.canvas.style.left = '-9999px';
+    this.canvas.style.top = '-9999px';
+    // Don't add to DOM here; we'll attach temporarily when needed
   }
 
   async mergeVideoWithAudio(
@@ -51,11 +56,17 @@ export class SafeAudioMixer {
   ): Promise<Blob> {
     console.log('🎵 Trying simple audio merge...');
     
-    // Create video element
+    // Create video element (hidden) and attach to DOM to maximize compatibility
     const videoUrl = URL.createObjectURL(videoBlob);
     const video = document.createElement('video');
     video.src = videoUrl;
     video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = 'anonymous';
+    video.style.position = 'fixed';
+    video.style.left = '-9999px';
+    video.style.top = '-9999px';
+    document.body.appendChild(video);
     
     await new Promise<void>((resolve, reject) => {
       video.onloadedmetadata = () => {
@@ -68,10 +79,22 @@ export class SafeAudioMixer {
 
     if (onProgress) onProgress(20);
 
-    // Create audio element
+    // Create audio element (hidden) and attach to DOM to satisfy some browser policies
     const audioUrl = URL.createObjectURL(audioFile);
     const audio = document.createElement('audio');
     audio.src = audioUrl;
+    audio.crossOrigin = 'anonymous';
+    audio.playsInline = true;
+    audio.preload = 'auto';
+    audio.style.position = 'fixed';
+    audio.style.left = '-9999px';
+    audio.style.top = '-9999px';
+    // append both elements - some browsers require elements to be in DOM for audio capture
+    try {
+      document.body.appendChild(audio);
+    } catch (e) {
+      console.warn('Could not append audio element to DOM:', e);
+    }
     
     await new Promise<void>((resolve, reject) => {
       audio.onloadedmetadata = () => {
@@ -84,38 +107,66 @@ export class SafeAudioMixer {
 
     if (onProgress) onProgress(40);
 
-    // Setup canvas
+    // Setup canvas (attach if not attached)
+    if (!this.canvas.parentElement) {
+      // append temporarily to DOM to ensure captureStream works in all browsers
+      document.body.appendChild(this.canvas);
+    }
     this.canvas.width = video.videoWidth || 1920;
     this.canvas.height = video.videoHeight || 1080;
     
     // Create streams
-    const videoStream = this.canvas.captureStream(24); // Lower FPS for stability
+  const videoStream = this.canvas.captureStream(24); // Lower FPS for stability
     
     // Audio context
-    const audioContext = new AudioContext();
+    // Create audio context and connect audio element
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     if (audioContext.state === 'suspended') {
-      await audioContext.resume();
+      try {
+        await audioContext.resume();
+      } catch (e) {
+        console.warn('AudioContext resume failed:', e);
+      }
     }
-    
-    const audioSource = audioContext.createMediaElementSource(audio);
-    const audioDestination = audioContext.createMediaStreamDestination();
-    audioSource.connect(audioDestination);
+
+    let audioSource: MediaElementAudioSourceNode | null = null;
+    let audioDestination: MediaStreamAudioDestinationNode | null = null;
+    try {
+      audioSource = audioContext.createMediaElementSource(audio);
+      audioDestination = audioContext.createMediaStreamDestination();
+      audioSource.connect(audioDestination);
+    } catch (e) {
+      console.warn('Failed to create MediaElementSource (CORS/autoplay?):', e);
+      // We'll attempt to play audio directly and rely on browser to include audio (last resort)
+    }
     
     // Combine
     const combinedStream = new MediaStream();
     videoStream.getVideoTracks().forEach(track => combinedStream.addTrack(track));
-    audioDestination.stream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+    // If we successfully created an audioDestination, use its tracks, otherwise try to let audio element be captured by browser
+    if (audioDestination && audioDestination.stream.getAudioTracks().length > 0) {
+      audioDestination.stream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+    } else {
+      console.warn('⚠️ No audio tracks from WebAudio destination; combined stream will not include audio from WebAudio');
+    }
     
     console.log('🔗 Stream combined:', {
       video: combinedStream.getVideoTracks().length,
-      audio: combinedStream.getAudioTracks().length
+      audio: combinedStream.getAudioTracks().length,
+      audioDestinationAvailable: !!audioDestination
     });
 
     if (onProgress) onProgress(60);
     
     // Record
+    // Determine best supported codec
+    const codecCandidates = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp8', 'video/webm'];
+    let selectedCodec = codecCandidates.find(c => MediaRecorder.isTypeSupported(c));
+    if (!selectedCodec) selectedCodec = 'video/webm';
+    console.log('📦 Using MediaRecorder mimeType:', selectedCodec);
+
     const mediaRecorder = new MediaRecorder(combinedStream, {
-      mimeType: 'video/webm;codecs=vp8,opus'
+      mimeType: selectedCodec
     });
     
     const chunks: Blob[] = [];
@@ -141,12 +192,28 @@ export class SafeAudioMixer {
       }, 15000);
     });
     
-    // Start everything
-    mediaRecorder.start(200);
+    // Start everything - start mediaRecorder before playback to capture initial audio
+    try {
+      mediaRecorder.start(200);
+    } catch (e) {
+      console.error('MediaRecorder.start failed:', e);
+      // cleanup appended elements
+      try { if (audio && audio.parentElement) audio.parentElement.removeChild(audio); } catch {};
+      try { if (video && video.parentElement) video.parentElement.removeChild(video); } catch {};
+      try { if (this.canvas.parentElement) this.canvas.parentElement.removeChild(this.canvas); } catch {}
+      throw e;
+    }
+
     video.currentTime = 0;
     audio.currentTime = 0;
-    
-    await Promise.all([video.play(), audio.play()]);
+
+    // Play - may require user gesture (typically the process button is clicked by user)
+    try {
+      await Promise.all([video.play(), audio.play()]);
+    } catch (e) {
+      // playback may fail due to autoplay policy; log and continue - recorder may still capture
+      console.warn('Playback failed (autoplay policy?):', e);
+    }
     
     if (onProgress) onProgress(80);
     
@@ -171,16 +238,19 @@ export class SafeAudioMixer {
     });
     
     const result = await recordingPromise;
-    
-    // Cleanup
-    URL.revokeObjectURL(videoUrl);
-    URL.revokeObjectURL(audioUrl);
-    audioContext.close();
+
+    // Cleanup: remove appended DOM elements and revoke URLs
+    try { URL.revokeObjectURL(videoUrl); } catch {}
+    try { URL.revokeObjectURL(audioUrl); } catch {}
+    try { if (audio && audio.parentElement) audio.parentElement.removeChild(audio); } catch {}
+    try { if (video && video.parentElement) video.parentElement.removeChild(video); } catch {}
+    try { if (this.canvas.parentElement) this.canvas.parentElement.removeChild(this.canvas); } catch {}
+    try { audioContext.close(); } catch {}
     combinedStream.getTracks().forEach(track => track.stop());
-    
+
     if (onProgress) onProgress(100);
     console.log('🎵 Audio merge result:', result.size, 'bytes');
-    
+
     return result;
   }
 
