@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Music, Upload, X, Play, Pause, Cloud, CheckCircle, AlertCircle, Bug } from "lucide-react";
 import { uploadAudioFile, UploadProgress, MediaFile, testStorageConnection } from "@/lib/firebaseService";
+import { fileCache } from "@/lib/fileCache";
 import { useAuth } from "@/contexts/AuthContext";
 
 interface AudioUploadProps {
@@ -85,6 +86,14 @@ const AudioUpload = ({ onAudioUpload, audioFile, projectId }: AudioUploadProps) 
 
       console.log('✅ Audio upload successful:', uploadedFile);
       onAudioUpload(uploadedFile);
+
+      // Cache original File so later processing does not need to refetch (avoids CORS issues)
+      try {
+        fileCache.store(uploadedFile.id, file);
+        console.log('📁 Cached original audio file for', uploadedFile.id, file.name, file.size);
+      } catch (e) {
+        console.warn('Could not cache original audio file:', e);
+      }
 
       // Remove upload state after a brief delay
       setTimeout(() => {

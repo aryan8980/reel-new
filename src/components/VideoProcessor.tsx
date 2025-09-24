@@ -606,37 +606,54 @@ export default function VideoProcessor({
         console.log(`🎵 Available audio files: ${audioFiles.length}`);
         
         try {
-          // Get audio file
+          // Get audio file (prefer cached original to avoid CORS)
           let audioFile: File | null = fileCache.get(audioFiles[0].id);
-          
-          if (!audioFile) {
-            console.log('🔄 Audio file not in cache, fetching from URL');
-            const response = await fetch(audioFiles[0].url);
-            const audioBlob = await response.blob();
-            audioFile = new File([audioBlob], audioFiles[0].name, { 
-              type: audioFiles[0].mimeType || 'audio/mp3' 
-            });
-            fileCache.store(audioFiles[0].id, audioFile);
+          if (audioFile) {
+            console.log('📁 Using cached original audio file:', audioFile.name, audioFile.size);
+          } else {
+            console.log('🔄 Audio file not in cache, attempting fetch from URL (may hit CORS)...');
+            try {
+              const response = await fetch(audioFiles[0].url, { mode: 'cors' });
+              if (!response.ok) throw new Error('Fetch failed with status ' + response.status);
+              const audioBlob = await response.blob();
+              audioFile = new File([audioBlob], audioFiles[0].name, { 
+                type: audioFiles[0].mimeType || 'audio/mpeg' 
+              });
+              fileCache.store(audioFiles[0].id, audioFile);
+              console.log('✅ Fetched and cached audio file:', audioFile.name);
+            } catch (fetchErr) {
+              console.error('❌ Audio fetch failed (CORS likely):', fetchErr);
+              console.warn('➡️ Skipping audio merge and proceeding with video-only. Configure Firebase Storage CORS to allow this origin.');
+              audioFile = null;
+            }
           }
-          
-          console.log(`🎵 Using audio file: ${audioFile.name} (${(audioFile.size / 1024 / 1024).toFixed(1)}MB)`);
+
+          if (!audioFile) {
+            console.log('⚠️ No usable audio file available after fetch attempt, skipping merge.');
+          } else {
+            console.log(`🎵 Using audio file: ${audioFile.name} (${(audioFile.size / 1024 / 1024).toFixed(1)}MB)`);
+          }
           
           // Try direct element mixer first (keeps original encoding, may preserve quality)
           let videoWithAudio: Blob | null = null;
-          try {
-            console.log('🎧 Trying DirectElementMixer first...');
-            videoWithAudio = await directElementMixer.merge(finalVideo, audioFile, (progress) => {
-              const adjustedProgress = 75 + (progress * 0.1);
-              setProgress(adjustedProgress);
-            });
-            console.log('✅ DirectElementMixer succeeded');
-          } catch (directErr) {
-            console.warn('DirectElementMixer failed, falling back to SafeAudioMixer:', directErr);
-            console.log('🛡️ Falling back to SafeAudioMixer (video-first guarantee)');
-            videoWithAudio = await safeAudioMixer.mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
-              const adjustedProgress = 85 + (progress * 0.05);
-              setProgress(adjustedProgress);
-            });
+          if (audioFile) {
+            try {
+              console.log('🎧 Trying DirectElementMixer first...');
+              videoWithAudio = await directElementMixer.merge(finalVideo, audioFile, (progress) => {
+                const adjustedProgress = 75 + (progress * 0.1);
+                setProgress(adjustedProgress);
+              });
+              console.log('✅ DirectElementMixer succeeded');
+            } catch (directErr) {
+              console.warn('DirectElementMixer failed, falling back to SafeAudioMixer:', directErr);
+              console.log('🛡️ Falling back to SafeAudioMixer (video-first guarantee)');
+              videoWithAudio = await safeAudioMixer.mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
+                const adjustedProgress = 85 + (progress * 0.05);
+                setProgress(adjustedProgress);
+              });
+            }
+          } else {
+            console.log('🚫 Skipping both mixers because audioFile is null');
           }
 
           const mergeProgressBase = 75;
