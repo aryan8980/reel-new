@@ -21,6 +21,7 @@ import { useToast } from "@/hooks/use-toast";
 import { uploadVideoFile, MediaFile } from "@/lib/firebaseService";
 import { trimVideoSimple as trimVideo, concatenateVideos, initFFmpeg } from "@/lib/customVideoProcessor";
 import { SafeAudioMixer } from "@/lib/safeAudioMixer";
+import { DirectElementMixer } from "@/lib/directElementMixer";
 import { fileCache } from "@/lib/fileCache";
 import { firebaseML, VideoSegment } from "@/lib/firebaseML";
 import * as BeatDetection from "@/lib/beatDetection";
@@ -59,8 +60,9 @@ export default function VideoProcessor({
   const [mlAnalysisResults, setMlAnalysisResults] = useState<any>(null);
   const [actualSegmentsCreated, setActualSegmentsCreated] = useState(0);
   
-  // Initialize SAFE audio mixer - guarantees video processing works
-  const audioMixer = new SafeAudioMixer();
+  // Initialize mixers
+  const safeAudioMixer = new SafeAudioMixer();
+  const directElementMixer = new DirectElementMixer();
 
   // Debug test function to understand trimming behavior
   const testTrimming = async () => {
@@ -619,22 +621,40 @@ export default function VideoProcessor({
           
           console.log(`🎵 Using audio file: ${audioFile.name} (${(audioFile.size / 1024 / 1024).toFixed(1)}MB)`);
           
-          // Merge audio with video using SAFE mixer (video processing guaranteed!)
-          console.log(`� Starting ULTIMATE audio merge - will try ALL possible methods...`);
-          const videoWithAudio = await audioMixer.mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
+          // Try direct element mixer first (keeps original encoding, may preserve quality)
+          let videoWithAudio: Blob | null = null;
+          try {
+            console.log('🎧 Trying DirectElementMixer first...');
+            videoWithAudio = await directElementMixer.merge(finalVideo, audioFile, (progress) => {
+              const adjustedProgress = 75 + (progress * 0.1);
+              setProgress(adjustedProgress);
+            });
+            console.log('✅ DirectElementMixer succeeded');
+          } catch (directErr) {
+            console.warn('DirectElementMixer failed, falling back to SafeAudioMixer:', directErr);
+            console.log('🛡️ Falling back to SafeAudioMixer (video-first guarantee)');
+            videoWithAudio = await safeAudioMixer.mergeVideoWithAudio(finalVideo, audioFile, (progress) => {
+              const adjustedProgress = 85 + (progress * 0.05);
+              setProgress(adjustedProgress);
+            });
+          }
+
+          const mergeProgressBase = 75;
+          const videoWithAudioFinal = videoWithAudio;
+          const _dummy = (progress: number) => {
             const adjustedProgress = 75 + (progress * 0.2);
             setProgress(adjustedProgress);
             console.log(`🎵 Audio merge progress: ${Math.round(progress)}%`);
-          });
+          };
           
           console.log(`📊 Audio merge result:`, {
             originalVideoSize: finalVideo.size,
-            mergedVideoSize: videoWithAudio?.size || 0,
-            success: !!(videoWithAudio && videoWithAudio.size > 0)
+            mergedVideoSize: videoWithAudioFinal?.size || 0,
+            success: !!(videoWithAudioFinal && videoWithAudioFinal.size > 0)
           });
           
-          if (videoWithAudio && videoWithAudio.size > 0) {
-            finalVideo = videoWithAudio;
+          if (videoWithAudioFinal && videoWithAudioFinal.size > 0) {
+            finalVideo = videoWithAudioFinal;
             console.log(`✅ Audio merge successful! Final size: ${finalVideo.size} bytes`);
             console.log(`🎵 Video now has audio track merged!`);
           } else {
